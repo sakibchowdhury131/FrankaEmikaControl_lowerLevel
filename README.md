@@ -1,4 +1,4 @@
-# Panda 5th-Order Polynomial Trajectory Planner + Executor
+# Panda Polynomial Trajectory Planner + Executor
 
 Two-stage system with a clean Python/C++ split:
 
