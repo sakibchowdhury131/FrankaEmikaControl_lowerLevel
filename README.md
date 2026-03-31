@@ -145,17 +145,32 @@ The executor will:
 ### Control law
 
 ```
-tau_cmd = tau_ff(t) + Kp*(q_des(t) - q) + Kd*(dq_des(t) - dq)
+tau_ff  = M(q_actual)·ddq_des(t) + C(q_actual, dq_actual)·dq_actual + g(q_actual)
+tau_cmd = tau_ff + Kp*(q_des(t) - q) + Kd*(dq_des(t) - dq)
 ```
 
-where `tau_ff` comes from the CSV. The PD terms correct for model inaccuracies
-during tracking. Execution is split into three phases:
+The feedforward is computed **online at the robot's actual state** using
+libfranka's built-in model (`model.gravity`, `model.coriolis`, `model.mass`),
+with `ddq_des` from the planned CSV.  This eliminates the phase-mismatch problem
+where a time-indexed CSV feedforward switches to a braking torque while the robot
+is still accelerating.  The PD terms provide additional correction for residual
+model error.
 
-| Phase      | Duration    | Behaviour                                      |
-|------------|-------------|------------------------------------------------|
-| Ramp-up    | 500 ms      | Hold `q_start`, ramp `tau_ff` from 0 → `traj[0].tau` |
-| Tracking   | trajectory  | Follow CSV at 1 kHz                            |
-| Ramp-down  | 150 ms      | Ramp `tau_ff` from `traj.back().tau` → gravity |
+Execution is split into three phases:
+
+| Phase      | Duration    | Behaviour                                                    |
+|------------|-------------|--------------------------------------------------------------|
+| Ramp-up    | 500 ms      | Hold `q_start`, ramp `tau_ff` from 0 → `traj[0].tau`        |
+| Tracking   | trajectory (or N/2 in throw mode) | Follow CSV at 1 kHz    |
+| Ramp-down  | 500 ms      | Ramp `tau_ff` from last trajectory torque → gravity-only     |
+
+#### Throw mode
+
+Set `kThrowMode = true` in `panda_executor.cpp` to stop trajectory playback at
+the **peak-velocity midpoint** (N/2 samples) rather than running the full
+deceleration phase.  Use this for ball-throwing tasks where the ball should be
+released at peak arm velocity.  The arm continues moving under inertia after
+the trajectory index freezes; `kThrowMode = false` runs the complete arc.
 
 ---
 
@@ -163,16 +178,17 @@ during tracking. Execution is split into three phases:
 
 Edit in `executor/src/panda_executor.cpp`:
 
-| Constant            | Default   | Meaning                              |
+| Constant            | Value     | Meaning                              |
 |---------------------|-----------|--------------------------------------|
 | `kTauExtMax`        | 10.0 Nm   | External torque E-stop threshold     |
 | `kSigmaMinStop`     | 0.02 m/rad| Singularity E-stop threshold         |
 | `kSigmaMinWarn`     | 0.04 m/rad| Singularity warning threshold        |
 | `kMoveToStartSpd`   | 0.12      | Speed factor for move-to-start       |
 | `kRampMs`           | 500 ms    | Torque ramp-up duration              |
-| `kRampDownMs`       | 150 ms    | Torque ramp-down duration            |
-| `kKp`               | [50,50,50,50,20,20,20] Nm/rad | PD position gain    |
-| `kKd`               | [7,7,7,7,3,3,3] Nm·s/rad     | PD velocity gain    |
+| `kRampDownMs`       | 500 ms    | Torque ramp-down duration            |
+| `kThrowMode`        | false     | Stop at N/2 (peak velocity) for throws |
+| `kKp`               | [80,80,80,80,25,25,25] Nm/rad | PD position gain    |
+| `kKd`               | [10,10,10,10,4,4,4] Nm·s/rad  | PD velocity gain    |
 
 Edit in `planner/trajectory_planner.py`:
 
