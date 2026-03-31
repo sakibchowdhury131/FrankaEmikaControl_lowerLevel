@@ -1,0 +1,15 @@
+# Python virtual environment
+env/
+
+# Compiled Python
+__pycache__/
+*.py[cod]
+
+# C++ build artifacts
+executor/build/
+
+# Generated trajectory output
+trajectory.csv
+
+# pytest cache
+.pytest_cache/
