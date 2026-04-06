@@ -35,10 +35,12 @@ static constexpr double kSettleSec     = 1.5;
 static constexpr int    kRampMs        = 500;
 static constexpr int    kRampDownMs    = 500;
 static constexpr double kMaxTorqueRate = 0.5;
-static constexpr std::array<double,7> kKp = {80,80,80,80,25,25,25};
-static constexpr std::array<double,7> kKd = {10,10,10,10, 4, 4, 4};
+// Joints 2 & 4 (indices 1, 3) carry the highest inertial loads — give them
+// stronger feedback to resist dynamic coupling from each other.
+static constexpr std::array<double,7> kKp = {100,100,100,100,50,50,50};
+static constexpr std::array<double,7> kKd = { 14, 14, 14, 14, 7, 7, 7};
 static constexpr double kTauExtMax     = 10.0;
-static constexpr double kSigmaMinStop  =  0.02;
+static constexpr double kSigmaMinStop  =  0.002;
 static constexpr double kSigmaMinWarn  =  0.04;
 static constexpr std::array<double,7> kVelHard = {
     2.11, 2.11, 2.11, 2.11, 2.53, 2.53, 2.53
@@ -185,7 +187,27 @@ void execute_trajectory(franka::Robot& robot,
                         const std::vector<TrajPoint>& traj,
                         Stats& stats,
                         std::vector<ActualRow>& log) {
+    // ── Phase-joint setup (Option 3 feedforward) ─────────────────────────────
+    // Find the joint with the largest displacement; its actual position is used
+    // as a phase variable to look up the trajectory index.  This keeps the
+    // feedforward (q_des, dq_des, ddq_des) matched to where the robot actually
+    // is, not where the wall-clock says it should be — eliminating the
+    // inertial-coupling overshoot seen with pure time-indexed playback.
+    int phase_joint = 0;
+    {
+        double max_d = 0.0;
+        for (int j = 0; j < 7; ++j) {
+            double d = std::abs(traj.back().q[j] - traj.front().q[j]);
+            if (d > max_d) { max_d = d; phase_joint = j; }
+        }
+    }
+    const double q_phase_start = traj.front().q[phase_joint];
+    const double q_phase_range = traj.back().q[phase_joint] - q_phase_start;
+    std::cout << "[EXEC] Phase joint: j" << phase_joint+1
+              << "  range=" << q_phase_range << " rad\n";
+
     size_t idx = 0;
+    size_t phase_ti_prev = 0;          // monotonic lower bound for phase lookup
     std::array<double,7> tau_ff_prev = {0,0,0,0,0,0,0};
     double t_exec = 0.0;   // wall time inside torque control
 
@@ -252,11 +274,26 @@ void execute_trajectory(franka::Robot& robot,
                         return franka::MotionFinished(franka::Torques(zero));
                     }
                 }
-                q_des=traj[ti].q; dq_des=traj[ti].dq;
-                // Online RNEA at actual robot state with planned ddq.
-                // Gravity and coriolis are exact at actual (q,dq); only the
-                // inertial term M·ddq_des uses time-indexed desired accel
-                // (magnitude ~3 Nm, easily handled by PD if mismatched).
+                // ── Phase-indexed reference ───────────────────────────────
+                // Map the dominant joint's actual position to a trajectory
+                // index.  The result is clamped to [phase_ti_prev, traj_end-1]
+                // so it never regresses (monotonic advance only).
+                size_t phase_ti = ti;
+                if (std::abs(q_phase_range) > 0.01) {
+                    double phase = (state.q[phase_joint] - q_phase_start)
+                                   / q_phase_range;
+                    phase = std::max(0.0, std::min(1.0, phase));
+                    size_t cand = static_cast<size_t>(
+                        phase * double(traj.size() - 1));
+                    phase_ti = std::max(phase_ti_prev,
+                                        std::min(cand, traj_end - 1));
+                }
+                phase_ti_prev = phase_ti;
+
+                q_des  = traj[phase_ti].q;
+                dq_des = traj[phase_ti].dq;
+                // Online RNEA: gravity + coriolis at actual state,
+                // inertial term M·ddq uses phase-indexed desired accel.
                 {
                     auto grav  = model.gravity(state);
                     auto cor   = model.coriolis(state);
@@ -264,7 +301,7 @@ void execute_trajectory(franka::Robot& robot,
                     for (int j=0;j<7;++j) {
                         tau_ff_des[j] = grav[j] + cor[j];
                         for (int k=0;k<7;++k)
-                            tau_ff_des[j] += M_arr[j + k*7] * traj[ti].ddq[k];
+                            tau_ff_des[j] += M_arr[j + k*7] * traj[phase_ti].ddq[k];
                     }
                 }
                 ++stats.steps;
